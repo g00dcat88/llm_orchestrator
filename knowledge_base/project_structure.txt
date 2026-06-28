@@ -1,0 +1,22 @@
+=== КАРТА СТРУКТУРЫ И ФАЙЛОВ ERP-ПРОЕКТА ===
+Этот документ описывает основные папки и назначение файлов в проекте.
+
+
+📁 F:\Projects\
+  ├── 📁 L-start\               - Основной проект ERP (FastAPI + Next.js)
+  │    ├── 📁 backend\           - Бэкенд на Python (FastAPI)
+  │    │    └── 📁 app\          - Исходный код бэкенда
+  │    │         ├── 📁 models\  - Описание таблиц базы данных (SQLAlchemy)
+  │    │         ├── 📁 schemas\ - Схемы валидации API (Pydantic)
+  │    │         ├── 📁 routers\ - Эндпоинты API (FastAPI)
+  │    │         └── 📁 database\- Настройка подключения к SQLite (l_start.db)
+  │    └── 📁 frontend\          - Фронтенд на React/Next.js/TypeScript
+  │         └── 📁 src\
+  │              ├── 📁 app\     - Маршрутизация страниц Next.js
+  │              └── 📁 components\- UI-компоненты (включая виджет чата)
+  └── 📁 llm_orchestrator\       - ИИ-Оркестратор и Ассистент Гермес
+       ├── 📁 skills\            - JSON-файлы с системными промптами (core_agent, erp_assistant)
+       ├── 📁 sandbox\           - Папка-песочница для безопасного запуска Python-кода
+       ├── 📁 knowledge_base\    - База знаний (RAG) компании (регламенты, схемы, API)
+       ├── 📄 tools.py\          - Описание всех инструментов ИИ (execute_python, search_knowledge_base)
+       └── 📄 generate_project_maps.py - Скрипт автоматического обновления карт проекта

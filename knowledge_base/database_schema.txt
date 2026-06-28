@@ -1,0 +1,228 @@
+=== СХЕМА БАЗЫ ДАННЫХ ERP ООО «Л-СТАРТ» ===
+Этот документ описывает таблицы SQLite базы данных, типы полей и связи.
+
+Таблица: tenants
+----------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - subdomain: VARCHAR(100) NOT NULL
+  - company_name: VARCHAR(200) NOT NULL
+  - inn: VARCHAR(12) NOT NULL
+  - plan_id: INTEGER NOT NULL -> Ссылка на plans(id)
+  - is_active: BOOLEAN NOT NULL DEFAULT True
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BE9CD580>
+  - role_matrix: VARCHAR(2000) NULL
+  - notification_settings: VARCHAR(2000) NULL
+  - backup_settings: VARCHAR(2000) NULL
+  - company_structure: VARCHAR(5000) NULL
+  - tab_visibility: VARCHAR(2000) NULL
+  - schedule_settings: VARCHAR(2000) NULL
+
+========================================
+
+Таблица: plans
+--------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - name: VARCHAR(50) NOT NULL
+  - max_employees: INTEGER NOT NULL DEFAULT 10
+  - max_equipment: INTEGER NOT NULL DEFAULT 100
+  - has_api: BOOLEAN NOT NULL DEFAULT False
+  - has_telegram_bot: BOOLEAN NOT NULL DEFAULT False
+  - price_month: INTEGER NOT NULL DEFAULT 0
+
+========================================
+
+Таблица: users
+--------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - email: VARCHAR(100) NOT NULL
+  - full_name: VARCHAR(150) NOT NULL
+  - tenant_id: INTEGER NOT NULL -> Ссылка на tenants(id)
+  - role: VARCHAR(50) NOT NULL
+  - is_active: BOOLEAN NOT NULL DEFAULT True
+  - telegram_id: VARCHAR(50) NULL
+  - username: VARCHAR(100) NULL
+  - password_hash: VARCHAR(200) NULL
+  - employee_id: INTEGER NULL -> Ссылка на employees(id)
+  - font_settings: VARCHAR(1000) NULL
+  - hidden_info: VARCHAR(500) NULL
+  - current_token: VARCHAR(100) NULL
+  - token_created_at: DATETIME NULL
+
+========================================
+
+Таблица: employees
+------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - full_name: VARCHAR(255) NOT NULL
+  - position: VARCHAR(100) NOT NULL
+  - department: VARCHAR(100) NOT NULL
+  - sub_department: VARCHAR(100) NULL
+  - phone: VARCHAR(50) NULL
+  - email: VARCHAR(100) NULL
+  - birth_date: DATETIME NULL
+  - notes: VARCHAR(1000) NULL
+  - personnel_number: VARCHAR(50) NULL
+  - is_on_trip: BOOLEAN NOT NULL DEFAULT False
+  - is_sick_leave: BOOLEAN NOT NULL DEFAULT False
+  - is_vacation: BOOLEAN NOT NULL DEFAULT False
+  - photo_path: VARCHAR(500) NULL
+  - hire_date: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BE9FA700>
+  - is_active: BOOLEAN NOT NULL DEFAULT True
+  - is_monitored: BOOLEAN NOT NULL DEFAULT False
+  - is_umo_required: BOOLEAN NOT NULL DEFAULT False
+  - tenant_id: INTEGER NOT NULL -> Ссылка на tenants(id)
+  - telegram_nickname: VARCHAR(100) NULL
+  - telegram_chat_id: VARCHAR(50) NULL
+  - max_id: VARCHAR(100) NULL
+
+========================================
+
+Таблица: document_types
+-----------------------
+Столбцы:
+  - code: VARCHAR(50) NOT NULL (PRIMARY KEY)
+  - name: VARCHAR(250) NOT NULL
+  - validity_months: INTEGER NOT NULL
+  - description: VARCHAR(1000) NULL
+
+========================================
+
+Таблица: employee_documents
+---------------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - employee_id: INTEGER NOT NULL -> Ссылка на employees(id)
+  - doc_type_code: VARCHAR(50) NOT NULL -> Ссылка на document_types(code)
+  - issue_date: DATETIME NOT NULL
+  - expiry_date: DATETIME NOT NULL
+  - file_path: VARCHAR(500) NOT NULL
+  - is_actual: BOOLEAN NOT NULL DEFAULT True
+
+========================================
+
+Таблица: work_orders
+--------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - title: VARCHAR(255) NOT NULL
+  - description: VARCHAR(1000) NOT NULL
+  - status: VARCHAR(50) NOT NULL DEFAULT planned
+  - priority: INTEGER NOT NULL DEFAULT 1
+  - start_date: DATETIME NULL
+  - end_date: DATETIME NULL
+  - tenant_id: INTEGER NOT NULL -> Ссылка на tenants(id)
+  - assigned_to: INTEGER NULL -> Ссылка на employees(id)
+  - equipment: VARCHAR(255) NULL
+  - project_id: INTEGER NULL -> Ссылка на projects(id)
+  - schedule_id: INTEGER NULL -> Ссылка на employee_schedules(id)
+  - report_due_date: DATETIME NULL
+  - report_confirmed_at: DATETIME NULL
+  - history_log: VARCHAR(4000) NULL
+
+========================================
+
+Таблица: projects
+-----------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - year: INTEGER NOT NULL
+  - code: VARCHAR(100) NOT NULL
+  - direction: VARCHAR(100) NOT NULL
+  - customer: VARCHAR(255) NULL
+  - contract_info: VARCHAR(255) NULL
+  - comments: VARCHAR(1000) NULL
+  - commissioning_date: DATETIME NULL
+  - warranty_end: DATETIME NULL
+  - commissioning_staff: VARCHAR(500) NULL
+  - equipment_list: VARCHAR(5000) NULL
+  - status: VARCHAR(50) NULL
+
+========================================
+
+Таблица: project_documents
+--------------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - project_id: INTEGER NOT NULL -> Ссылка на projects(id)
+  - category: VARCHAR(100) NOT NULL
+  - filename: VARCHAR(255) NOT NULL
+  - file_path: VARCHAR(500) NOT NULL
+  - uploaded_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BEA51A80>
+
+========================================
+
+Таблица: employee_schedules
+---------------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - employee_id: INTEGER NOT NULL -> Ссылка на employees(id)
+  - project_code: VARCHAR(100) NULL
+  - type: VARCHAR(50) NOT NULL
+  - start_date: DATETIME NOT NULL
+  - end_date: DATETIME NOT NULL
+  - travel_start_date: DATETIME NULL
+  - travel_end_date: DATETIME NULL
+  - travel_back_start_date: DATETIME NULL
+  - travel_back_end_date: DATETIME NULL
+  - notes: VARCHAR(500) NULL
+  - is_signed: BOOLEAN NOT NULL DEFAULT False
+  - tenant_id: INTEGER NOT NULL DEFAULT 1 -> Ссылка на tenants(id)
+
+========================================
+
+Таблица: equipment
+------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - vin: VARCHAR(17) NOT NULL
+  - name: VARCHAR(255) NOT NULL
+  - serial_number: VARCHAR(100) NULL
+  - model_type: VARCHAR(100) NOT NULL
+  - status: VARCHAR(50) NOT NULL DEFAULT active
+  - tenant_id: INTEGER NOT NULL -> Ссылка на tenants(id)
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BED9A340>
+  - updated_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BED9A520>
+  - project_id: INTEGER NULL -> Ссылка на projects(id)
+
+========================================
+
+Таблица: digital_passports
+--------------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - equipment_id: INTEGER NOT NULL -> Ссылка на equipment(id)
+  - version: VARCHAR(50) NOT NULL
+  - data_json: JSON NOT NULL
+  - last_inspection: DATETIME NULL
+  - next_inspection: DATETIME NULL
+
+========================================
+
+Таблица: system_notifications
+-----------------------------
+Столбцы:
+  - id: INTEGER NOT NULL (PRIMARY KEY)
+  - text: VARCHAR(1000) NOT NULL
+  - event_type: VARCHAR(100) NOT NULL
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BEDDCEA0>
+  - urgency: VARCHAR(50) NOT NULL DEFAULT medium
+  - status: VARCHAR(50) NOT NULL DEFAULT pending
+  - assigned_to_id: INTEGER NULL
+  - assigned_to_name: VARCHAR(255) NULL
+  - accepted_at: DATETIME NULL
+  - completed_at: DATETIME NULL
+  - completed_by: VARCHAR(255) NULL
+  - completion_details: VARCHAR(1000) NULL
+  - custom_comment: VARCHAR(1000) NULL
+  - related_entity_type: VARCHAR(100) NULL
+  - related_entity_id: INTEGER NULL
+  - extra_data: VARCHAR(1000) NULL
+  - is_archived: BOOLEAN NOT NULL DEFAULT False
+  - archived_at: DATETIME NULL
+  - archived_by: VARCHAR(255) NULL
+
+========================================

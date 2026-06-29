@@ -350,6 +350,48 @@ class ERPIntegrationTools:
         except Exception as e:
             return f"Ошибка при консолидации отчета в проект: {e}"
 
+    def get_task_comments(self, work_order_id: int) -> str:
+        """
+        Получить историю сообщений и комментариев по задаче.
+        """
+        url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}/comments"
+        try:
+            req = self._make_request(url)
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                comments = json.loads(resp.read().decode('utf-8'))
+                if not comments:
+                    return f"Чат по задаче #{work_order_id} пуст."
+                
+                log = f"История обсуждения по задаче #{work_order_id}:\n"
+                for c in comments:
+                    is_sys = " [СИСТЕМНОЕ]" if c.get("is_system") else ""
+                    log += f"- {c.get('sender_name')}{is_sys} [{c.get('created_at')}]: {c.get('text')}\n"
+                return log
+        except Exception as e:
+            return f"Ошибка при получении комментариев по задаче: {e}"
+
+    def update_task_summary(self, work_order_id: int, summary_text: str) -> str:
+        """
+        Обновить официальный сводный отчет по задаче (history_log).
+        """
+        put_url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}"
+        try:
+            payload = {
+                "history_log": summary_text
+            }
+            data = json.dumps(payload).encode('utf-8')
+            req = self._make_request(
+                put_url,
+                data=data,
+                headers={"Content-Type": "application/json"},
+                method="PUT"
+            )
+            with urllib.request.urlopen(req, timeout=10) as resp:
+                json.loads(resp.read().decode('utf-8'))
+            return f"Сводный отчет по задаче #{work_order_id} успешно обновлен."
+        except Exception as e:
+            return f"Ошибка при обновлении сводного отчета задачи: {e}"
+
     def list_upcoming_trips(self) -> str:
         """
         Получить список всех запланированных и активных командировок сотрудников.

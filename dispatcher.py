@@ -20,6 +20,7 @@ class QueryDispatcher:
             "   - 'fsm_summary': общие списки нарядов, статистика по задачам, отчеты по выполненным работам.\n"
             "   - 'python_sandbox': математические расчеты, вычисления, написание и выполнение кода.\n"
             "   - 'web_monitor': проверки работоспособности сайтов или URL.\n"
+            "   - 'task_constructor': конструирование новых задач/шаблонов, опрос ИИ для создания задачи, настройка структуры задачи.\n"
             "   - 'general': общие вопросы, не подходящие под другие категории.\n"
             "2. Упомянутые сущности (ФИО сотрудников, коды нарядов типа Tsk..., коды проектов Pjt...).\n\n"
             "Верни ответ СТРОГО в формате JSON:\n"
@@ -48,7 +49,9 @@ class QueryDispatcher:
             
         # Fallback classifications based on simple patterns
         query_lower = user_query.lower()
-        if "посчитай" in query_lower or "вычисли" in query_lower or "2 + 2" in query_lower or "105 *" in query_lower:
+        if "конструктор" in query_lower or "шаблон" in query_lower or "создай задачу" in query_lower or "составить наряд" in query_lower:
+            return {"scope": "task_constructor", "entity_id": None, "reason": "Regex fallback: task constructor"}
+        elif "посчитай" in query_lower or "вычисли" in query_lower or "2 + 2" in query_lower or "105 *" in query_lower:
             return {"scope": "python_sandbox", "entity_id": None, "reason": "Regex fallback: math"}
         elif "httpbin" in query_lower or "монитор" in query_lower:
             return {"scope": "web_monitor", "entity_id": None, "reason": "Regex fallback: web_monitor"}

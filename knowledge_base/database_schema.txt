@@ -10,7 +10,7 @@
   - inn: VARCHAR(12) NOT NULL
   - plan_id: INTEGER NOT NULL -> Ссылка на plans(id)
   - is_active: BOOLEAN NOT NULL DEFAULT True
-  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BE9CD580>
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E686D580>
   - role_matrix: VARCHAR(2000) NULL
   - notification_settings: VARCHAR(2000) NULL
   - backup_settings: VARCHAR(2000) NULL
@@ -50,6 +50,7 @@
   - hidden_info: VARCHAR(500) NULL
   - current_token: VARCHAR(100) NULL
   - token_created_at: DATETIME NULL
+  - uid: VARCHAR(50) NULL DEFAULT <function gen_uid_func.<locals>._gen at 0x00000180E689C9A0>
 
 ========================================
 
@@ -70,7 +71,7 @@
   - is_sick_leave: BOOLEAN NOT NULL DEFAULT False
   - is_vacation: BOOLEAN NOT NULL DEFAULT False
   - photo_path: VARCHAR(500) NULL
-  - hire_date: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BE9FA700>
+  - hire_date: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E689E840>
   - is_active: BOOLEAN NOT NULL DEFAULT True
   - is_monitored: BOOLEAN NOT NULL DEFAULT False
   - is_umo_required: BOOLEAN NOT NULL DEFAULT False
@@ -78,6 +79,7 @@
   - telegram_nickname: VARCHAR(100) NULL
   - telegram_chat_id: VARCHAR(50) NULL
   - max_id: VARCHAR(100) NULL
+  - uid: VARCHAR(50) NULL DEFAULT <function gen_uid_func.<locals>._gen at 0x00000180E689EDE0>
 
 ========================================
 
@@ -122,6 +124,7 @@
   - report_due_date: DATETIME NULL
   - report_confirmed_at: DATETIME NULL
   - history_log: VARCHAR(4000) NULL
+  - uid: VARCHAR(50) NULL DEFAULT <function gen_uid_func.<locals>._gen at 0x00000180E68C72E0>
 
 ========================================
 
@@ -140,6 +143,7 @@
   - commissioning_staff: VARCHAR(500) NULL
   - equipment_list: VARCHAR(5000) NULL
   - status: VARCHAR(50) NULL
+  - uid: VARCHAR(50) NULL DEFAULT <function gen_uid_func.<locals>._gen at 0x00000180E68F8D60>
 
 ========================================
 
@@ -151,7 +155,7 @@
   - category: VARCHAR(100) NOT NULL
   - filename: VARCHAR(255) NOT NULL
   - file_path: VARCHAR(500) NOT NULL
-  - uploaded_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BEA51A80>
+  - uploaded_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E68FA340>
 
 ========================================
 
@@ -184,8 +188,8 @@
   - model_type: VARCHAR(100) NOT NULL
   - status: VARCHAR(50) NOT NULL DEFAULT active
   - tenant_id: INTEGER NOT NULL -> Ссылка на tenants(id)
-  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BED9A340>
-  - updated_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BED9A520>
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E7C12D40>
+  - updated_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E7C12F20>
   - project_id: INTEGER NULL -> Ссылка на projects(id)
 
 ========================================
@@ -208,7 +212,7 @@
   - id: INTEGER NOT NULL (PRIMARY KEY)
   - text: VARCHAR(1000) NOT NULL
   - event_type: VARCHAR(100) NOT NULL
-  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x000001E9BEDDCEA0>
+  - created_at: DATETIME NOT NULL DEFAULT <function datetime.utcnow at 0x00000180E7C49940>
   - urgency: VARCHAR(50) NOT NULL DEFAULT medium
   - status: VARCHAR(50) NOT NULL DEFAULT pending
   - assigned_to_id: INTEGER NULL

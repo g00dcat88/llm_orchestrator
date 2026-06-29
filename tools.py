@@ -7,11 +7,12 @@ class Tool:
     """
     Класс-обертка для инструмента (функции), который может быть вызван моделью.
     """
-    def __init__(self, name: str, description: str, parameters: dict, func):
+    def __init__(self, name: str, description: str, parameters: dict, func, category: str = "general"):
         self.name = name
         self.description = description
         self.parameters = parameters
         self.func = func
+        self.category = category
 
     def to_schema(self) -> dict:
         return {
@@ -133,6 +134,14 @@ class ToolRegistry:
 
     def get_schemas(self) -> list:
         return [tool.to_schema() for tool in self.tools.values()]
+
+    def get_schemas_for_scope(self, scope: str) -> list:
+        """Returns schemas of tools that belong to a specific scope or are general-purpose."""
+        return [
+            tool.to_schema()
+            for tool in self.tools.values()
+            if tool.category == scope or tool.category == "general"
+        ]
 
     def call(self, name: str, arguments: dict) -> str:
         if name not in self.tools:

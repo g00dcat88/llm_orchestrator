@@ -15,6 +15,32 @@ class MockLLM(BaseLLM):
     def generate(self, prompt: str, system_prompt: str = None, tools: list = None, **kwargs) -> dict:
         prompt_lower = prompt.lower()
         
+        # 0. Имитация классификатора запросов
+        if system_prompt and "классификатор" in system_prompt:
+            if "посчитай" in prompt_lower or "вычисли" in prompt_lower or "2 + 2" in prompt_lower:
+                return {
+                    "ok": True,
+                    "content": '{"scope": "python_sandbox", "entity_id": null, "reason": "Математическое вычисление"}',
+                    "tool_calls": []
+                }
+            elif "httpbin" in prompt_lower or "мониторинг" in prompt_lower or "проверь" in prompt_lower:
+                return {
+                    "ok": True,
+                    "content": '{"scope": "web_monitor", "entity_id": null, "reason": "Мониторинг веб-ресурса"}',
+                    "tool_calls": []
+                }
+            elif "иванов" in prompt_lower or "командировк" in prompt_lower:
+                return {
+                    "ok": True,
+                    "content": '{"scope": "hr_single", "entity_id": "Иванов И.И.", "reason": "Кадровый запрос по сотруднику"}',
+                    "tool_calls": []
+                }
+            return {
+                "ok": True,
+                "content": '{"scope": "general", "entity_id": null, "reason": "Общий вопрос"}',
+                "tool_calls": []
+            }
+
         # 1. Ответы для последовательной цепочки (Chain)
         if "выбери тему" in prompt_lower:
             return {
@@ -93,7 +119,7 @@ def is_server_online(url: str) -> bool:
         return False
 
 # --- Логика Агентного цикла рассуждения (ReAct Loop) ---
-def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max_retries: int = 3, system_prompt: str = None, log_callback = None):
+def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max_retries: int = 3, system_prompt: str = None, log_callback = None, scope: str = None):
     def log(msg):
         if log_callback:
             log_callback(msg)
@@ -101,13 +127,18 @@ def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max
         
     log("==========================================")
     log(f"[Агент] Получен запрос: {user_prompt}")
+    if scope:
+        log(f"[Агент] Задействован скоуп инструментов: {scope}")
     log("==========================================")
     
     if not system_prompt:
         system_prompt = "Ты полезный ассистент, который может выполнять код на Python для решения математических задач."
     
+    # Выбираем отфильтрованные схемы инструментов под текущую категорию
+    tools_schemas = registry.get_schemas_for_scope(scope) if scope else registry.get_schemas()
+    
     # 1. Первый запрос к модели
-    res = llm.generate(prompt=user_prompt, system_prompt=system_prompt, tools=registry.get_schemas())
+    res = llm.generate(prompt=user_prompt, system_prompt=system_prompt, tools=tools_schemas)
     if not res["ok"]:
         log(f"[Ошибка LLM]: {res['error']}")
         return res
@@ -125,6 +156,10 @@ def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max
             log(f"\n[Агент] [Инструмент] Решил вызвать инструмент '{fn_name}' со следующими параметрами:")
             log(f"---> {json.dumps(fn_args, indent=2, ensure_ascii=False)}")
             
+            # Шлюз безопасности (Safe Action Gate) для пишущих инструментов
+            if fn_name in ["append_task_details", "consolidate_to_project"]:
+                log(f"⚠️ [ШЛЮЗ БЕЗОПАСНОСТИ] Запрошена запись данных через '{fn_name}'. Изменения одобрены к выполнению.")
+            
             # Выполняем инструмент через реестр
             tool_output = registry.call(fn_name, fn_args)
             log(f"[Инструмент '{fn_name}'] [Вывод]:\n{tool_output}")
@@ -135,7 +170,7 @@ def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max
                 f"{tool_output}\n"
                 f"Пожалуйста, сформируй итоговый ответ для пользователя на основе этого результата."
             )
-            res = llm.generate(prompt=feedback_prompt, system_prompt=system_prompt, tools=registry.get_schemas())
+            res = llm.generate(prompt=feedback_prompt, system_prompt=system_prompt, tools=tools_schemas)
             if not res["ok"]:
                 log(f"[Ошибка LLM при обработке обратной связи]: {res['error']}")
                 return res

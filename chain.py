@@ -1,48 +1,49 @@
+import logging
+from typing import Optional
 from gateway import BaseLLM
 from prompt import PromptTemplate
 
+logger = logging.getLogger(__name__)
+
+
 class LLMChain:
-    """
-    Цепочка последовательного выполнения задач с передачей контекста между шагами.
-    """
     def __init__(self, llm: BaseLLM):
         self.llm = llm
-        self.steps = []
+        self.steps: list[dict] = []
 
-    def add_step(self, name: str, template: PromptTemplate, output_key: str, system_prompt: str = None):
-        """
-        Добавление шага в цепочку.
-        """
+    def add_step(
+        self,
+        name: str,
+        template: PromptTemplate,
+        output_key: str,
+        system_prompt: Optional[str] = None,
+    ) -> None:
         self.steps.append({
             "name": name,
             "template": template,
             "output_key": output_key,
-            "system_prompt": system_prompt
+            "system_prompt": system_prompt,
         })
 
     def run(self, inputs: dict, **kwargs) -> dict:
-        """
-        Последовательный запуск всех шагов цепочки с накоплением состояния.
-        """
         state = inputs.copy()
-        
+
         for step in self.steps:
-            print(f"-> Выполнение шага: {step['name']}...")
-            
-            # Форматируем шаблон с текущими переменными состояния
+            logger.info("Цепочка — шаг: %s", step["name"])
             prompt_str = step["template"].render(**state)
-            
-            # Генерируем ответ модели
+
             res = self.llm.generate(
-                prompt=prompt_str, 
+                prompt=prompt_str,
                 system_prompt=step["system_prompt"],
-                **kwargs
+                **kwargs,
             )
-            
+
             if not res["ok"]:
                 raise RuntimeError(f"Ошибка на шаге '{step['name']}': {res['error']}")
-                
-            # Записываем результат шага в состояние цепочки
-            state[step["output_key"]] = res["content"].strip()
-            
+
+            content = res["content"]
+            if isinstance(content, dict):
+                content = str(content)
+            state[step["output_key"]] = content.strip()
+
         return state

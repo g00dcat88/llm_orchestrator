@@ -1,0 +1,18 @@
+version: "3.8"
+
+services:
+  hermes:
+    build: .
+    ports:
+      - "8888:8888"
+    environment:
+      - LLM_BASE_URL=http://host.docker.internal:8080
+      - ERP_BASE_URL=http://host.docker.internal:8000
+      - ERP_SERVICE_TOKEN=${ERP_SERVICE_TOKEN}
+      - LOG_LEVEL=INFO
+      - SELF_CRITIQUE_ENABLED=true
+    volumes:
+      - ./knowledge_base:/app/knowledge_base
+      - ./skills:/app/skills
+      - ./data:/app/data
+    restart: unless-stopped

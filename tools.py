@@ -1,13 +1,28 @@
+import ast
+import json
+import logging
 import os
 import subprocess
 import sys
+import time
+import urllib.error
+import urllib.parse
+import urllib.request
 from pathlib import Path
+from typing import Callable, Optional
+
+logger = logging.getLogger(__name__)
+
 
 class Tool:
-    """
-    Класс-обертка для инструмента (функции), который может быть вызван моделью.
-    """
-    def __init__(self, name: str, description: str, parameters: dict, func, category: str = "general"):
+    def __init__(
+        self,
+        name: str,
+        description: str,
+        parameters: dict,
+        func: Callable,
+        category: str = "general",
+    ):
         self.name = name
         self.description = description
         self.parameters = parameters
@@ -20,49 +35,45 @@ class Tool:
             "function": {
                 "name": self.name,
                 "description": self.description,
-                "parameters": self.parameters
-            }
+                "parameters": self.parameters,
+            },
         }
 
     def execute(self, **kwargs) -> str:
         try:
             return str(self.func(**kwargs))
         except Exception as e:
+            logger.error("Ошибка инструмента %s: %s", self.name, e)
             return f"Ошибка выполнения инструмента {self.name}: {e}"
 
 
 class PythonSandbox:
-    """
-    Безопасная песочница для выполнения кода только внутри определенной папки.
-    """
-    def __init__(self, sandbox_dir: Path):
+    def __init__(self, sandbox_dir: Path, timeout: int = 10):
         self.sandbox_dir = sandbox_dir.resolve()
         self.sandbox_dir.mkdir(exist_ok=True, parents=True)
+        self.timeout = timeout
 
-    def _install_missing_imports(self, code: str):
-        import ast
+    def _install_missing_imports(self, code: str) -> None:
         try:
             tree = ast.parse(code)
         except Exception:
             return
 
-        imported_modules = set()
+        imported_modules: set[str] = set()
         for node in ast.walk(tree):
             if isinstance(node, ast.Import):
                 for alias in node.names:
-                    imported_modules.add(alias.name.split('.')[0])
+                    imported_modules.add(alias.name.split(".")[0])
             elif isinstance(node, ast.ImportFrom):
                 if node.module:
-                    imported_modules.add(node.module.split('.')[0])
+                    imported_modules.add(node.module.split(".")[0])
 
         package_mapping = {
-            'bs4': 'beautifulsoup4',
-            'yaml': 'pyyaml',
-            'sklearn': 'scikit-learn',
-            'dateutil': 'python-dateutil',
-            'PIL': 'pillow',
-            'pg': 'pygresql',
-            'mysql': 'mysql-connector-python'
+            "bs4": "beautifulsoup4",
+            "yaml": "pyyaml",
+            "sklearn": "scikit-learn",
+            "dateutil": "python-dateutil",
+            "PIL": "pillow",
         }
 
         for module in imported_modules:
@@ -70,73 +81,63 @@ class PythonSandbox:
                 __import__(module)
             except ImportError:
                 pip_name = package_mapping.get(module, module)
-                print(f"[Sandbox] Автоматическая установка библиотеки: {pip_name}")
+                logger.info("Автоустановка библиотеки: %s", pip_name)
                 subprocess.run(
                     [sys.executable, "-m", "pip", "install", pip_name],
                     stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
+                    stderr=subprocess.DEVNULL,
                 )
 
     def execute_code(self, code: str) -> str:
-        # Автоматически доустанавливаем импортируемые ИИ библиотеки
         self._install_missing_imports(code)
-
         script_path = (self.sandbox_dir / "temp_script.py").resolve()
-        
-        # Гарантируем, что путь находится внутри папки песочницы
+
         if not str(script_path).startswith(str(self.sandbox_dir)):
-            return "Ошибка безопасности: Попытка выхода за пределы папки песочницы!"
+            return "Ошибка безопасности: попытка выхода за пределы песочницы!"
 
         try:
             script_path.write_text(code, encoding="utf-8")
         except Exception as e:
-            return f"Ошибка записи кода в песочницу: {e}"
+            return f"Ошибка записи кода: {e}"
 
         try:
-            # Запускаем скрипт, принудительно выставляя рабочую директорию в sandbox_dir
             res = subprocess.run(
                 [sys.executable, "temp_script.py"],
                 cwd=str(self.sandbox_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=10
+                timeout=self.timeout,
             )
-            
-            # Удаляем временный файл
             if script_path.exists():
                 script_path.unlink()
-                
+
             if res.returncode == 0:
-                return res.stdout if res.stdout.strip() else "Скрипт выполнен успешно (вывода нет)."
-            else:
-                return f"Ошибка выполнения (код возврата {res.returncode}):\n{res.stderr}"
-                
+                return res.stdout.strip() if res.stdout.strip() else "Скрипт выполнен (вывода нет)."
+            return f"Ошибка (код {res.returncode}):\n{res.stderr}"
+
         except subprocess.TimeoutExpired:
             if script_path.exists():
                 script_path.unlink()
-            return "Ошибка: Выполнение превысило тайм-аут в 10 секунд."
+            return f"Ошибка: тайм-аут {self.timeout} сек."
         except Exception as e:
             if script_path.exists():
                 script_path.unlink()
-            return f"Критическая ошибка запуска: {e}"
+            return f"Критическая ошибка: {e}"
 
 
 class ToolRegistry:
-    """
-    Реестр инструментов, управляющий их регистрацией и вызовами.
-    """
-    def __init__(self):
-        self.tools = {}
+    def __init__(self) -> None:
+        self.tools: dict[str, Tool] = {}
 
-    def register(self, tool: Tool):
+    def register(self, tool: Tool) -> None:
         self.tools[tool.name] = tool
+        logger.debug("Зарегистрирован инструмент: %s (category=%s)", tool.name, tool.category)
 
-    def get_schemas(self) -> list:
+    def get_schemas(self) -> list[dict]:
         return [tool.to_schema() for tool in self.tools.values()]
 
-    def get_schemas_for_scope(self, scope: str) -> list:
-        """Returns schemas of tools that belong to a specific scope or are general-purpose."""
+    def get_schemas_for_scope(self, scope: str) -> list[dict]:
         return [
             tool.to_schema()
             for tool in self.tools.values()
@@ -145,19 +146,11 @@ class ToolRegistry:
 
     def call(self, name: str, arguments: dict) -> str:
         if name not in self.tools:
-            return f"Ошибка: Инструмент '{name}' не найден в реестре."
+            return f"Ошибка: инструмент '{name}' не найден."
         return self.tools[name].execute(**arguments)
 
 
-import urllib.request
-import urllib.error
-import time
-import json
-
 class WebMonitorTool:
-    """
-    Инструмент для мониторинга веб-ресурсов с логированием результатов (учет работы).
-    """
     def __init__(self, log_path: Path):
         self.log_path = log_path
         if not self.log_path.exists():
@@ -174,291 +167,400 @@ class WebMonitorTool:
 
         try:
             req = urllib.request.Request(
-                url,
-                headers={"User-Agent": "LLMOrchestrator-Monitor/1.0"}
+                url, headers={"User-Agent": "LLMOrchestrator-Monitor/1.0"}
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
                 status_code = resp.status
                 content = resp.read()
                 content_len = len(content)
                 success = True
-                message = "Успешно"
+                message = "OK"
                 try:
                     text = content.decode("utf-8")
                     data_preview = text[:300] + ("..." if len(text) > 300 else "")
-                except:
-                    data_preview = f"[Бинарные данные, {content_len} байт]"
+                except Exception:
+                    data_preview = f"[binary, {content_len} bytes]"
         except urllib.error.HTTPError as e:
             status_code = e.code
-            message = f"HTTP Error: {e.reason}"
-            data_preview = f"Ошибка HTTP {e.code}"
+            message = f"HTTP {e.code}: {e.reason}"
+            data_preview = str(e.code)
         except urllib.error.URLError as e:
             message = f"URL Error: {e.reason}"
-            data_preview = "Ошибка подключения к хосту"
+            data_preview = "Connection failed"
         except Exception as e:
             message = str(e)
-            data_preview = "Внутреннее исключение"
+            data_preview = "Internal error"
 
-        # Сохранение записи лога (учет и контроль работы)
         record = {
             "timestamp": timestamp,
             "url": url,
             "success": success,
             "status_code": status_code,
             "message": message,
-            "data_length": content_len
+            "data_length": content_len,
         }
 
         try:
-            logs = []
+            logs: list = []
             if self.log_path.exists():
                 try:
                     logs = json.loads(self.log_path.read_text(encoding="utf-8"))
-                except:
+                except Exception:
                     logs = []
             logs.append(record)
-            self.log_path.write_text(json.dumps(logs, ensure_ascii=False, indent=2), encoding="utf-8")
-        except Exception as log_err:
-            print(f"Ошибка сохранения лога мониторинга: {log_err}")
+            self.log_path.write_text(
+                json.dumps(logs, ensure_ascii=False, indent=2), encoding="utf-8"
+            )
+        except Exception as e:
+            logger.error("Ошибка сохранения лога: %s", e)
 
         return (
-            f"[Мониторинг URL]: {url}\n"
-            f"[Время проверки]: {timestamp}\n"
+            f"[URL]: {url}\n"
+            f"[Время]: {timestamp}\n"
             f"[Статус]: {status_code} ({message})\n"
-            f"[Данные (превью)]: {data_preview}\n"
-            f"[Учет работы]: Лог сохранен в {self.log_path.name}"
+            f"[Данные]: {data_preview}\n"
+            f"[Лог]: сохранён в {self.log_path.name}"
         )
 
-import urllib.parse
 
 class ERPIntegrationTools:
-    """
-    Инструменты для интеграции Оркестратора с REST API L-Start ERP.
-    """
-    def __init__(self, base_url: str = "http://localhost:8000", service_token: str = None):
+    def __init__(self, base_url: str = "http://localhost:8000", service_token: str = ""):
         self.base_url = base_url.rstrip("/")
         self.service_token = service_token
 
-    def _make_request(self, url, data=None, headers=None, method=None):
-        req_headers = {}
+    def _make_request(
+        self,
+        url: str,
+        data: Optional[bytes] = None,
+        headers: Optional[dict] = None,
+        method: Optional[str] = None,
+    ) -> urllib.request.Request:
+        req_headers: dict[str, str] = {}
         if headers:
             req_headers.update(headers)
-        if getattr(self, "service_token", None):
+        if self.service_token:
             req_headers["X-ERP-Service-Token"] = self.service_token
         return urllib.request.Request(url, data=data, headers=req_headers, method=method)
 
+    def _get_json(self, url: str) -> dict | list:
+        req = self._make_request(url)
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            return json.loads(resp.read().decode("utf-8"))
+
     def get_project_card(self, project_code: str) -> str:
-        """
-        Получить информацию о проекте по его коду.
-        """
         url = f"{self.base_url}/api/v1/hr/projects?search={urllib.parse.quote(project_code)}"
         try:
-            req = self._make_request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                data = json.loads(resp.read().decode('utf-8'))
-                if not data:
-                    return f"Проект с кодом {project_code} не найден в ERP."
-                p = data[0]
-                return (
-                    f"Карточка Проекта:\n"
-                    f"- ID: {p.get('id')}\n"
-                    f"- Код: {p.get('code')}\n"
-                    f"- Год: {p.get('year')}\n"
-                    f"- Направление: {p.get('direction_display') or p.get('direction')}\n"
-                    f"- Заказчик: {p.get('customer') or '—'}\n"
-                    f"- Договор: {p.get('contract_info') or '—'}\n"
-                    f"- Статус: {p.get('status_display') or p.get('status') or '—'}\n"
-                    f"- Оборудование: {p.get('equipment_list') or '—'}\n"
-                    f"- Комментарии / История:\n{p.get('comments') or '—'}"
-                )
+            data = self._get_json(url)
+            if not data:
+                return f"Проект {project_code} не найден."
+            p = data[0]
+            return (
+                f"Проект:\n"
+                f"- ID: {p.get('id')}\n"
+                f"- Код: {p.get('code')}\n"
+                f"- Год: {p.get('year')}\n"
+                f"- Направление: {p.get('direction_display') or p.get('direction')}\n"
+                f"- Заказчик: {p.get('customer') or '—'}\n"
+                f"- Договор: {p.get('contract_info') or '—'}\n"
+                f"- Статус: {p.get('status_display') or p.get('status') or '—'}\n"
+                f"- Оборудование: {p.get('equipment_list') or '—'}\n"
+                f"- История:\n{p.get('comments') or '—'}"
+            )
         except Exception as e:
-            return f"Ошибка при получении карточки проекта: {e}"
+            return f"Ошибка получения проекта: {e}"
 
     def get_trip_details(self, schedule_id: int) -> str:
-        """
-        Получить параметры командировки по ее ID.
-        """
         url = f"{self.base_url}/api/v1/hr/employee-schedules/{schedule_id}"
         try:
-            req = self._make_request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                s = json.loads(resp.read().decode('utf-8'))
-                return (
-                    f"Параметры командировки:\n"
-                    f"- ID Командировки: {s.get('id')}\n"
-                    f"- Имя сотрудника: {s.get('employee_name')}\n"
-                    f"- Код проекта: {s.get('project_code')}\n"
-                    f"- Период: {s.get('start_date')[:10]} — {s.get('end_date')[:10]}\n"
-                    f"- Цель поездки: {s.get('notes') or '—'}"
-                )
+            s = self._get_json(url)
+            return (
+                f"Командировка:\n"
+                f"- ID: {s.get('id')}\n"
+                f"- Сотрудник: {s.get('employee_name')}\n"
+                f"- Проект: {s.get('project_code')}\n"
+                f"- Период: {s.get('start_date', '')[:10]} — {s.get('end_date', '')[:10]}\n"
+                f"- Цель: {s.get('notes') or '—'}"
+            )
         except Exception as e:
-            return f"Ошибка при получении деталей командировки: {e}"
+            return f"Ошибка: {e}"
 
     def append_task_details(self, work_order_id: int, text: str, author_name: str) -> str:
-        """
-        Дополнить существующий наряд новой записью лога работ.
-        """
-        get_url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}"
         try:
-            req = self._make_request(get_url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                wo = json.loads(resp.read().decode('utf-8'))
-                
+            wo = self._get_json(f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}")
             current_log = wo.get("history_log") or ""
             date_str = time.strftime("%d.%m.%Y %H:%M")
-            new_log_entry = f"\n\n[{date_str}] {author_name} (записано через ИИ-Ассистент Гермес):\n{text}"
-            updated_log = current_log.strip() + new_log_entry
-            
-            put_url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}"
-            payload = {
-                "history_log": updated_log
-            }
-            data = json.dumps(payload).encode('utf-8')
+            new_entry = f"\n\n[{date_str}] {author_name} (Гермес):\n{text}"
+            updated_log = current_log.strip() + new_entry
+
+            payload = json.dumps({"history_log": updated_log}).encode("utf-8")
             req = self._make_request(
-                put_url,
-                data=data,
+                f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}",
+                data=payload,
                 headers={"Content-Type": "application/json"},
-                method="PUT"
+                method="PUT",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                # This will also trigger FastAPI side project comments consolidation
-                json.loads(resp.read().decode('utf-8'))
-                
-            return f"Наряд #{work_order_id} успешно дополнен отчетом от {author_name}."
+                json.loads(resp.read().decode("utf-8"))
+            return f"Наряд #{work_order_id} дополнен отчётом от {author_name}."
         except Exception as e:
-            return f"Ошибка при дополнении наряда: {e}"
+            return f"Ошибка дополнения наряда: {e}"
 
     def consolidate_to_project(self, project_id: int, summary_text: str) -> str:
-        """
-        Записать отчет в карточку проекта.
-        """
         try:
-            put_url = f"{self.base_url}/api/v1/hr/projects/{project_id}"
-            payload = {
-                "comments": summary_text
-            }
-            data = json.dumps(payload).encode('utf-8')
+            payload = json.dumps({"comments": summary_text}).encode("utf-8")
             req = self._make_request(
-                put_url,
-                data=data,
+                f"{self.base_url}/api/v1/hr/projects/{project_id}",
+                data=payload,
                 headers={"Content-Type": "application/json"},
-                method="PUT"
+                method="PUT",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                json.loads(resp.read().decode('utf-8'))
-            return f"Отчет успешно сохранен в карточке проекта #{project_id}."
+                json.loads(resp.read().decode("utf-8"))
+            return f"Отчёт сохранён в проекте #{project_id}."
         except Exception as e:
-            return f"Ошибка при консолидации отчета в проект: {e}"
+            return f"Ошибка: {e}"
 
     def get_task_comments(self, work_order_id: int) -> str:
-        """
-        Получить историю сообщений и комментариев по задаче.
-        """
         url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}/comments"
         try:
-            req = self._make_request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                comments = json.loads(resp.read().decode('utf-8'))
-                if not comments:
-                    return f"Чат по задаче #{work_order_id} пуст."
-                
-                log = f"История обсуждения по задаче #{work_order_id}:\n"
-                for c in comments:
-                    is_sys = " [СИСТЕМНОЕ]" if c.get("is_system") else ""
-                    log += f"- {c.get('sender_name')}{is_sys} [{c.get('created_at')}]: {c.get('text')}\n"
-                return log
+            comments = self._get_json(url)
+            if not comments:
+                return f"Чат по задаче #{work_order_id} пуст."
+            lines = [f"История задачи #{work_order_id}:"]
+            for c in comments:
+                sys_flag = " [СИСТ.]" if c.get("is_system") else ""
+                lines.append(
+                    f"- {c.get('sender_name')}{sys_flag} [{c.get('created_at')}]: {c.get('text')}"
+                )
+            return "\n".join(lines)
         except Exception as e:
-            return f"Ошибка при получении комментариев по задаче: {e}"
+            return f"Ошибка: {e}"
 
     def update_task_summary(self, work_order_id: int, summary_text: str) -> str:
-        """
-        Обновить официальный сводный отчет по задаче (history_log).
-        """
-        put_url = f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}"
         try:
-            payload = {
-                "history_log": summary_text
-            }
-            data = json.dumps(payload).encode('utf-8')
+            payload = json.dumps({"history_log": summary_text}).encode("utf-8")
             req = self._make_request(
-                put_url,
-                data=data,
+                f"{self.base_url}/api/v1/hr/work-orders/{work_order_id}",
+                data=payload,
                 headers={"Content-Type": "application/json"},
-                method="PUT"
+                method="PUT",
             )
             with urllib.request.urlopen(req, timeout=10) as resp:
-                json.loads(resp.read().decode('utf-8'))
-            return f"Сводный отчет по задаче #{work_order_id} успешно обновлен."
+                json.loads(resp.read().decode("utf-8"))
+            return f"Отчёт по задаче #{work_order_id} обновлён."
         except Exception as e:
-            return f"Ошибка при обновлении сводного отчета задачи: {e}"
+            return f"Ошибка: {e}"
 
     def list_upcoming_trips(self) -> str:
-        """
-        Получить список всех запланированных и активных командировок сотрудников.
-        """
         url = f"{self.base_url}/api/v1/hr/employee-schedules"
         try:
-            req = self._make_request(url)
-            with urllib.request.urlopen(req, timeout=10) as resp:
-                schedules = json.loads(resp.read().decode('utf-8'))
-                if not schedules:
-                    return "В системе нет запланированных или активных командировок."
-                
-                lines = ["Список командировок:"]
-                for s in schedules:
-                    display_type = s.get('type_display') or s.get('type', '')
-                    lines.append(
-                        f"- ID командировки (графика): {s.get('id')}, Сотрудник: {s.get('employee_name')}, "
-                        f"Проект: {s.get('project_code')}, "
-                        f"Период: {s.get('start_date')[:10]} - {s.get('end_date')[:10]}, "
-                        f"Тип: {display_type}, Цель: {s.get('notes') or '—'}"
-                    )
-                return "\n".join(lines)
+            schedules = self._get_json(url)
+            if not schedules:
+                return "Нет запланированных командировок."
+            lines = ["Командировки:"]
+            for s in schedules:
+                dtype = s.get("type_display") or s.get("type", "")
+                lines.append(
+                    f"- ID:{s.get('id')} | {s.get('employee_name')} | "
+                    f"Проект: {s.get('project_code')} | "
+                    f"{s.get('start_date', '')[:10]}–{s.get('end_date', '')[:10]} | "
+                    f"{dtype} | {s.get('notes') or '—'}"
+                )
+            return "\n".join(lines)
         except Exception as e:
-            return f"Ошибка при получении списка командировок: {e}"
+            return f"Ошибка: {e}"
 
     def search_knowledge_base(self, query: str) -> str:
-        """
-        Ищет информацию в базе знаний компании (инструкции, регламенты, регламенты ПНР, контакты).
-        Параметр 'query' — ключевые слова для поиска.
-        """
-        # Dynamically determine the path of knowledge_base relative to this file
         current_dir = Path(__file__).resolve().parent
         knowledge_dir = current_dir / "knowledge_base"
         if not knowledge_dir.exists():
-            knowledge_dir.mkdir(exist_ok=True, parents=True)
-            readme = knowledge_dir / "README.txt"
-            readme.write_text("База знаний Л-Старт. Поместите сюда текстовые инструкции.", encoding="utf-8")
-            
-        results = []
+            return "База знаний не найдена."
+
         keywords = [k.lower().strip() for k in query.split() if len(k.strip()) > 2]
         if not keywords:
-            return "Запрос слишком короткий для поиска."
+            return "Запрос слишком короткий."
 
-        for file_path in knowledge_dir.glob("**/*"):
-            if file_path.is_file() and file_path.suffix in [".txt", ".md"]:
+        results: list[dict] = []
+        for fp in knowledge_dir.glob("**/*"):
+            if fp.is_file() and fp.suffix in [".txt", ".md"]:
                 try:
-                    text = file_path.read_text(encoding="utf-8")
-                    paragraphs = [p.strip() for p in text.split("\n\n") if p.strip()]
-                    for p_idx, para in enumerate(paragraphs):
+                    text = fp.read_text(encoding="utf-8")
+                    for para in text.split("\n\n"):
+                        para = para.strip()
+                        if not para:
+                            continue
                         score = sum(1 for kw in keywords if kw in para.lower())
                         if score > 0:
-                            results.append({
-                                "file": file_path.name,
-                                "paragraph": para,
-                                "score": score
-                            })
-                except Exception as e:
-                    print(f"Ошибка чтения файла {file_path.name}: {e}")
+                            results.append({"file": fp.name, "text": para, "score": score})
+                except Exception:
+                    pass
 
         if not results:
-            return "В локальной базе знаний ничего не найдено по вашему запросу."
+            return "Ничего не найдено в базе знаний."
 
         results.sort(key=lambda x: x["score"], reverse=True)
-        top_results = results[:3]
-        
-        output = [f"Результаты поиска в базе знаний по запросу '{query}':"]
-        for r in top_results:
-            output.append(f"--- Источник: {r['file']} (Релевантность: {r['score']}) ---\n{r['paragraph']}\n")
+        top = results[:3]
+        out = [f"Результаты поиска по '{query}':"]
+        for r in top:
+            out.append(f"--- {r['file']} (score={r['score']}) ---\n{r['text']}\n")
+        return "\n".join(out)
+
+
+class CodeSearchTool:
+    def __init__(self, backend_path: str):
+        self.backend_path = Path(backend_path) if backend_path else None
+
+    def search(self, query: str, file_pattern: str = "*.py") -> str:
+        if not self.backend_path or not self.backend_path.exists():
+            return "Путь к исходному коду не настроен."
+
+        try:
+            result = subprocess.run(
+                ["rg", "-l", "--glob", file_pattern, "-i", query, str(self.backend_path)],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            files = [f.strip() for f in result.stdout.strip().split("\n") if f.strip()]
+            if not files:
+                return f"По запросу '{query}' ничего не найдено в коде."
+
+            output = [f"Найдено в {len(files)} файлах:"]
+            for fp in files[:5]:
+                try:
+                    content = Path(fp).read_text(encoding="utf-8")
+                    lines = content.split("\n")
+                    matches = []
+                    query_lower = query.lower()
+                    for i, line in enumerate(lines):
+                        if query_lower in line.lower():
+                            matches.append(f"  L{i+1}: {line.strip()}")
+                            if len(matches) >= 3:
+                                break
+                    output.append(f"\n{fp}:")
+                    output.extend(matches)
+                except Exception:
+                    output.append(f"\n{fp}: [не удалось прочитать]")
+
+            return "\n".join(output)
+        except FileNotFoundError:
+            return self._fallback_search(query, file_pattern)
+        except Exception as e:
+            return f"Ошибка поиска: {e}"
+
+    def _fallback_search(self, query: str, file_pattern: str) -> str:
+        if not self.backend_path:
+            return "Backend path not configured."
+        results: list[str] = []
+        query_lower = query.lower()
+        for fp in self.backend_path.glob(f"**/{file_pattern}"):
+            try:
+                text = fp.read_text(encoding="utf-8")
+                if query_lower in text.lower():
+                    results.append(str(fp))
+            except Exception:
+                pass
+        if not results:
+            return f"Ничего не найдено по '{query}'."
+        output = [f"Найдено в {len(results)} файлах:"]
+        for r in results[:5]:
+            output.append(f"  {r}")
         return "\n".join(output)
 
+
+class EntitySchemaTool:
+    def __init__(self, knowledge_dir: Path):
+        self.knowledge_dir = knowledge_dir
+
+    def get_schema(self, table_name: str) -> str:
+        schema_file = self.knowledge_dir / "database_schema.txt"
+        if not schema_file.exists():
+            return "Файл схемы БД не найден. Запустите generate_project_maps.py."
+
+        text = schema_file.read_text(encoding="utf-8")
+        blocks = text.split("=" * 40)
+        for block in blocks:
+            if f"Таблица: {table_name}" in block:
+                return block.strip()
+        return f"Таблица '{table_name}' не найдена в схеме."
+
+
+class ApiDocsTool:
+    def __init__(self, knowledge_dir: Path):
+        self.knowledge_dir = knowledge_dir
+
+    def get_docs(self, endpoint_pattern: str) -> str:
+        api_file = self.knowledge_dir / "api_routes.txt"
+        if not api_file.exists():
+            return "Файл API-маршрутов не найден. Запустите generate_project_maps.py."
+
+        text = api_file.read_text(encoding="utf-8")
+        blocks = text.split("-" * 30)
+        matches = []
+        for block in blocks:
+            if endpoint_pattern.lower() in block.lower():
+                matches.append(block.strip())
+
+        if not matches:
+            return f"Эндпоинт '{endpoint_pattern}' не найден."
+        return "\n\n".join(matches[:3])
+
+
+class ListEntitiesTool:
+    def __init__(self, knowledge_dir: Path):
+        self.knowledge_dir = knowledge_dir
+
+    def list_tables(self) -> str:
+        schema_file = self.knowledge_dir / "database_schema.txt"
+        if not schema_file.exists():
+            return "Файл схемы БД не найден."
+
+        text = schema_file.read_text(encoding="utf-8")
+        tables = []
+        for line in text.split("\n"):
+            if line.startswith("Таблица: "):
+                tables.append(line.replace("Таблица: ", "").strip())
+
+        if not tables:
+            return "Таблицы не найдены."
+        return "Таблицы БД:\n" + "\n".join(f"  - {t}" for t in tables)
+
+    def list_api_endpoints(self) -> str:
+        api_file = self.knowledge_dir / "api_routes.txt"
+        if not api_file.exists():
+            return "Файл API не найден."
+
+        text = api_file.read_text(encoding="utf-8")
+        endpoints = []
+        for line in text.split("\n"):
+            if line.startswith("Маршрут: "):
+                endpoints.append(line.replace("Маршрут: ", "").strip())
+
+        if not endpoints:
+            return "Эндпоинты не найдены."
+        return "API-эндпоинты:\n" + "\n".join(f"  - {e}" for e in endpoints)
+
+
+class EntityRelationsTool:
+    def __init__(self, knowledge_dir: Path):
+        self.knowledge_dir = knowledge_dir
+
+    def get_relations(self, table_name: str) -> str:
+        schema_file = self.knowledge_dir / "database_schema.txt"
+        if not schema_file.exists():
+            return "Файл схемы БД не найден."
+
+        text = schema_file.read_text(encoding="utf-8")
+        blocks = text.split("=" * 40)
+        for block in blocks:
+            if f"Таблица: {table_name}" in block:
+                relations = []
+                for line in block.split("\n"):
+                    if "Ссылка на" in line:
+                        relations.append(line.strip())
+                if not relations:
+                    return f"У таблицы '{table_name}' нет внешних ключей."
+                return f"Связи таблицы '{table_name}':\n" + "\n".join(
+                    f"  - {r}" for r in relations
+                )
+        return f"Таблица '{table_name}' не найдена."

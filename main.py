@@ -1,296 +1,309 @@
 import json
+import logging
+import sys
+import time
 import urllib.request
 from pathlib import Path
-from gateway import LlamaServerLLM, BaseLLM
+
+from config import Config
+from conversation import ConversationBuffer
+from gateway import BaseLLM, create_llm_from_config
 from prompt import PromptTemplate
 from chain import LLMChain
-from tools import Tool, ToolRegistry, PythonSandbox, WebMonitorTool
+from dispatcher import QueryDispatcher
+from rag import BM25SearchEngine
+from skills import SkillsManager
+from tools import (
+    Tool, ToolRegistry, PythonSandbox, WebMonitorTool, ERPIntegrationTools,
+    CodeSearchTool, EntitySchemaTool, ApiDocsTool, ListEntitiesTool, EntityRelationsTool,
+)
+from cache import ResponseCache
+from rate_limiter import DualRateLimiter
+from metrics import MetricsCollector, TimingContext
+from tracing import SpanContext, new_trace_id, reset_trace, format_trace
+from guardrails import OutputGuardrails, InputGuardrails
+from token_manager import TokenManager
 
-# --- Вспомогательный Mock-провайдер для автономной работы ---
-class MockLLM(BaseLLM):
-    """
-    Mock-модель, которая имитирует ответы LLM, если локальный llama-server выключен.
-    Это позволяет продемонстрировать логику работы оркестратора без запущенного сервера.
-    """
-    def generate(self, prompt: str, system_prompt: str = None, tools: list = None, **kwargs) -> dict:
-        prompt_lower = prompt.lower()
-        
-        # 0. Имитация классификатора запросов
-        if system_prompt and "классификатор" in system_prompt:
-            if "посчитай" in prompt_lower or "вычисли" in prompt_lower or "2 + 2" in prompt_lower:
-                return {
-                    "ok": True,
-                    "content": '{"scope": "python_sandbox", "entity_id": null, "reason": "Математическое вычисление"}',
-                    "tool_calls": []
-                }
-            elif "httpbin" in prompt_lower or "мониторинг" in prompt_lower or "проверь" in prompt_lower:
-                return {
-                    "ok": True,
-                    "content": '{"scope": "web_monitor", "entity_id": null, "reason": "Мониторинг веб-ресурса"}',
-                    "tool_calls": []
-                }
-            elif "иванов" in prompt_lower or "командировк" in prompt_lower:
-                return {
-                    "ok": True,
-                    "content": '{"scope": "hr_single", "entity_id": "Иванов И.И.", "reason": "Кадровый запрос по сотруднику"}',
-                    "tool_calls": []
-                }
-            return {
-                "ok": True,
-                "content": '{"scope": "general", "entity_id": null, "reason": "Общий вопрос"}',
-                "tool_calls": []
-            }
+logger = logging.getLogger("hermes")
 
-        # 1. Ответы для последовательной цепочки (Chain)
-        if "выбери тему" in prompt_lower:
-            return {
-                "ok": True,
-                "content": "Нейросети в медицине: диагностика заболеваний на ранних стадиях.",
-                "tool_calls": []
-            }
-        elif "составь подробный план" in prompt_lower:
-            return {
-                "ok": True,
-                "content": "1. Введение: текущее состояние ИИ в медицине.\n2. Применение сверточных нейросетей для анализа МРТ.\n3. Перспективы внедрения в клиниках.\n4. Проблемы конфиденциальности данных.",
-                "tool_calls": []
-            }
-            
-        # 2. Имитация вызова инструмента (Function Calling)
-        elif "посчитай" in prompt_lower or "вычисли" in prompt_lower or "2 + 2" in prompt_lower:
-            if tools:
-                return {
-                    "ok": True,
-                    "content": "",
-                    "tool_calls": [{
-                        "id": "call_mock_1",
-                        "type": "function",
-                        "function": {
-                            "name": "execute_python",
-                            "arguments": json.dumps({"code": "print(105 * 2 + 10)"})
-                        }
-                    }]
-                }
-        elif "монитор" in prompt_lower or "проверь состояние" in prompt_lower or "httpbin.org" in prompt_lower:
-            if tools:
-                return {
-                    "ok": True,
-                    "content": "",
-                    "tool_calls": [{
-                        "id": "call_mock_2",
-                        "type": "function",
-                        "function": {
-                            "name": "monitor_web_resource",
-                            "arguments": json.dumps({"url": "https://httpbin.org/status/200"})
-                        }
-                    }]
-                }
-        
-        # 3. Финальный ответ после выполнения инструмента
-        elif "выполнил задачу и вернул следующий результат" in prompt_lower:
-            if "monitor_web_resource" in prompt_lower or "проверки" in prompt_lower or "статус" in prompt_lower:
-                return {
-                    "ok": True,
-                    "content": "Я проверил веб-ресурс с помощью инструмента monitor_web_resource. Ресурс вернул статус 200 (Успешно), подтверждающий его корректную работу. Запись о проверке успешно занесена в лог.",
-                    "tool_calls": []
-                }
-            # Извлекаем результат выполнения
-            res_content = "220"
-            for line in prompt.split('\n'):
-                if line.strip() and not line.startswith("Инструмент") and not line.startswith("Пожалуйста"):
-                    res_content = line.strip()
-            return {
-                "ok": True,
-                "content": f"Результат вычислений равен {res_content}.",
-                "tool_calls": []
-            }
-            
-        return {
-            "ok": True,
-            "content": "Это тестовый ответ от MockLLM. Для полноценной генерации запустите llama-server.",
-            "tool_calls": []
-        }
 
-# --- Проверка активности сервера ---
-def is_server_online(url: str) -> bool:
-    try:
-        with urllib.request.urlopen(url + "/health", timeout=1.5) as r:
-            return r.status < 500
-    except:
-        return False
+def run_agentic_loop(
+    llm: BaseLLM,
+    registry: ToolRegistry,
+    user_prompt: str,
+    dispatcher: QueryDispatcher,
+    conversation: ConversationBuffer,
+    rag_engine: BM25SearchEngine,
+    config: Config,
+    cache: ResponseCache = None,
+    rate_limiter: DualRateLimiter = None,
+    metrics: MetricsCollector = None,
+    input_guard: InputGuardrails = None,
+    output_guard: OutputGuardrails = None,
+    token_mgr: TokenManager = None,
+    session_id: str = "default",
+    use_cache: bool = True,
+) -> dict:
+    trace_id = new_trace_id()
+    reset_trace()
+    start_time = time.time()
 
-# --- Логика Агентного цикла рассуждения (ReAct Loop) ---
-def run_agentic_loop(llm: BaseLLM, registry: ToolRegistry, user_prompt: str, max_retries: int = 3, system_prompt: str = None, log_callback = None, scope: str = None):
-    def log(msg):
-        if log_callback:
-            log_callback(msg)
-        print(msg)
-        
-    log("==========================================")
-    log(f"[Агент] Получен запрос: {user_prompt}")
-    if scope:
-        log(f"[Агент] Задействован скоуп инструментов: {scope}")
-    log("==========================================")
-    
-    if not system_prompt:
-        system_prompt = "Ты полезный ассистент, который может выполнять код на Python для решения математических задач."
-    
-    # Выбираем отфильтрованные схемы инструментов под текущую категорию
-    tools_schemas = registry.get_schemas_for_scope(scope) if scope else registry.get_schemas()
-    
-    # 1. Первый запрос к модели
-    res = llm.generate(prompt=user_prompt, system_prompt=system_prompt, tools=tools_schemas)
+    if input_guard:
+        check = input_guard.check(user_prompt)
+        if not check.passed:
+            return {"ok": False, "error": "Input blocked", "violations": check.violations}
+
+    if use_cache and cache:
+        cached = cache.get(user_prompt)
+        if cached:
+            logger.info("Cache hit")
+            if metrics:
+                metrics.record_counter("cache_hit")
+            cached["cached"] = True
+            return cached
+
+    if rate_limiter and not rate_limiter.allow_llm(session_id):
+        if metrics:
+            metrics.record_counter("rate_limited")
+        return {"ok": False, "error": "Rate limit exceeded"}
+
+    conversation.add_user_message(user_prompt)
+
+    with SpanContext("classify", trace_id=trace_id):
+        classification = dispatcher.classify(user_prompt)
+    scope = classification.get("scope", "general")
+    entity_id = classification.get("entity_id")
+    scope_prompt = dispatcher.get_response_prompt(scope)
+    logger.info("Scope: %s | Entity: %s", scope, entity_id)
+
+    context_parts: list[str] = []
+    with SpanContext("rag_search"):
+        rag_results = rag_engine.search(user_prompt, top_k=config.rag_top_k)
+        if rag_results:
+            context_parts.append("База знаний:\n" + "\n\n".join(r["text"] for r in rag_results))
+
+    conv_ctx = conversation.get_context_string()
+    if conv_ctx:
+        context_parts.append(f"История диалога:\n{conv_ctx}")
+
+    profile = conversation.get_profile_summary()
+    if profile:
+        context_parts.append(profile)
+
+    full_context = "\n\n".join(context_parts)
+    tools_schemas = registry.get_schemas_for_scope(scope)
+    system_prompt = scope_prompt
+
+    prompt_with_context = user_prompt
+    if full_context:
+        prompt_with_context = f"Контекст:\n{full_context}\n\nВопрос: {user_prompt}"
+
+    if token_mgr:
+        budget = token_mgr.create_budget()
+        if not budget.can_fit(prompt_with_context):
+            prompt_with_context = budget.truncate_to_fit(prompt_with_context, prefix="Контекст:\n", suffix=f"\n\nВопрос: {user_prompt}")
+
+    with SpanContext("llm_generate"):
+        res = llm.generate(prompt=prompt_with_context, system_prompt=system_prompt, tools=tools_schemas)
     if not res["ok"]:
-        log(f"[Ошибка LLM]: {res['error']}")
+        logger.error("LLM error: %s", res["error"])
         return res
 
     retries = 0
-    # Цикл выполнения инструментов, если модель решила их вызвать
-    while res.get("tool_calls") and retries < max_retries:
-        for tool_call in res["tool_calls"]:
-            fn_name = tool_call["function"]["name"]
+    while res.get("tool_calls") and retries < 3:
+        for tc in res["tool_calls"]:
+            fn_name = tc["function"]["name"]
             try:
-                fn_args = json.loads(tool_call["function"]["arguments"])
-            except Exception as e:
-                fn_args = {"code": tool_call["function"]["arguments"]} # Fallback при невалидном JSON
-                
-            log(f"\n[Агент] [Инструмент] Решил вызвать инструмент '{fn_name}' со следующими параметрами:")
-            log(f"---> {json.dumps(fn_args, indent=2, ensure_ascii=False)}")
-            
-            # Шлюз безопасности (Safe Action Gate) для пишущих инструментов
-            if fn_name in ["append_task_details", "consolidate_to_project"]:
-                log(f"⚠️ [ШЛЮЗ БЕЗОПАСНОСТИ] Запрошена запись данных через '{fn_name}'. Изменения одобрены к выполнению.")
-            
-            # Выполняем инструмент через реестр
-            tool_output = registry.call(fn_name, fn_args)
-            log(f"[Инструмент '{fn_name}'] [Вывод]:\n{tool_output}")
-            
-            # 2. Возвращаем результат выполнения инструмента обратно в LLM
-            feedback_prompt = (
-                f"Инструмент '{fn_name}' выполнил задачу и вернул следующий результат:\n"
-                f"{tool_output}\n"
-                f"Пожалуйста, сформируй итоговый ответ для пользователя на основе этого результата."
-            )
-            res = llm.generate(prompt=feedback_prompt, system_prompt=system_prompt, tools=tools_schemas)
+                fn_args = json.loads(tc["function"]["arguments"])
+            except Exception:
+                fn_args = {}
+            logger.info("Tool: %s", fn_name)
+            if fn_name in ("append_task_details", "consolidate_to_project"):
+                logger.warning("SAFE GATE: %s", fn_name)
+            with SpanContext(f"tool:{fn_name}"):
+                tool_output = registry.call(fn_name, fn_args)
+            feedback = f"Инструмент '{fn_name}' вернул:\n{tool_output}\nСформируй ответ."
+            res = llm.generate(prompt=feedback, system_prompt=system_prompt, tools=tools_schemas)
             if not res["ok"]:
-                log(f"[Ошибка LLM при обработке обратной связи]: {res['error']}")
                 return res
-                
         retries += 1
 
-    log(f"\n[Агент] Итоговый ответ:\n{res['content']}")
-    log("==========================================\n")
-    return res
+    answer = res.get("content", "")
+
+    if config.self_critique_enabled and answer:
+        with SpanContext("self_critique"):
+            critique = llm.generate(
+                prompt=f"Проверь:\nВопрос: {user_prompt}\nОтвет: {answer}\nВерни только ответ.",
+                system_prompt="Ты редактор.",
+            )
+            if critique.get("ok") and critique.get("content"):
+                answer = critique["content"]
+
+    if output_guard:
+        oc = output_guard.check(answer)
+        answer = oc.filtered_text
+
+    conversation.add_assistant_message(answer)
+
+    duration = time.time() - start_time
+    if metrics:
+        metrics.record_timing("full_pipeline", duration, scope=scope)
+        metrics.record_counter("requests")
+        metrics.record_counter(f"scope:{scope}")
+
+    logger.info("Done in %.1fs", duration * 1000)
+    logger.info("Trace:\n%s", format_trace())
+
+    result = {"ok": True, "content": answer, "trace_id": trace_id, "scope": scope, "duration_ms": round(duration * 1000, 1)}
+
+    if use_cache and cache:
+        cache.set(user_prompt, result)
+
+    return result
 
 
+def setup_logging(level: str) -> None:
+    logging.basicConfig(
+        level=getattr(logging, level.upper(), logging.INFO),
+        format="%(asctime)s [%(name)s] %(levelname)s: %(message)s",
+        datefmt="%H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)],
+    )
 
-def main():
-    # Определение путей песочницы
-    current_dir = Path(__file__).resolve().parent
-    sandbox_dir = current_dir / "sandbox"
-    
-    print(f"Настройка песочницы выполнения кода в папке:\n-> {sandbox_dir}\n")
-    sandbox = PythonSandbox(sandbox_dir)
-    
-    # Инициализация реестра инструментов и регистрация песочницы Python
+
+def build_registry(config: Config, project_dir: Path) -> ToolRegistry:
     registry = ToolRegistry()
-    
-    execute_python_tool = Tool(
+    sandbox_dir = project_dir / config.sandbox_dir
+    sandbox = PythonSandbox(sandbox_dir, timeout=config.sandbox_timeout)
+
+    registry.register(Tool(
         name="execute_python",
-        description="Выполняет код на Python в изолированной папке песочницы и возвращает stdout/stderr. Используйте для вычислений или обработки данных.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "code": {
-                    "type": "string",
-                    "description": "Исходный код программы на Python для выполнения."
-                }
-            },
-            "required": ["code"]
-        },
-        func=sandbox.execute_code
-    )
-    
-    registry.register(execute_python_tool)
-    
-    # Инициализация WebMonitorTool
-    monitor_log_path = sandbox_dir / "monitoring_log.json"
-    web_monitor = WebMonitorTool(monitor_log_path)
-    
-    web_monitor_tool = Tool(
+        description="Выполняет Python-код в песочнице.",
+        parameters={"type": "object", "properties": {"code": {"type": "string"}}, "required": ["code"]},
+        func=sandbox.execute_code, category="python_sandbox",
+    ))
+
+    monitor_log = sandbox_dir / "monitoring_log.json"
+    web_monitor = WebMonitorTool(monitor_log)
+    registry.register(Tool(
         name="monitor_web_resource",
-        description="Проверяет состояние указанного веб-ресурса (URL), получает preview-данные и записывает проверку в журнал логов.",
-        parameters={
-            "type": "object",
-            "properties": {
-                "url": {
-                    "type": "string",
-                    "description": "Полный URL-адрес веб-ресурса для проверки (например: https://httpbin.org/status/200)."
-                }
-            },
-            "required": ["url"]
-        },
-        func=web_monitor.monitor
-    )
-    
-    registry.register(web_monitor_tool)
-    
-    # Инициализация LLM Gateway
-    server_url = "http://127.0.0.1:8080" # Порт по умолчанию для llama-server
-    if is_server_online(server_url):
-        print("[+] Локальный llama-server обнаружен и находится в сети. Запуск в реальном режиме.")
-        llm = LlamaServerLLM(base_url=server_url)
-    else:
-        print("[-] Локальный llama-server не найден на 8080. Запуск в режиме симуляции (MockLLM).")
-        llm = MockLLM()
+        description="Проверяет доступность URL.",
+        parameters={"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+        func=web_monitor.monitor, category="web_monitor",
+    ))
 
-    # --- ДЕМОНСТРАЦИЯ 1: Последовательная цепочка промптов (LLMChain) ---
-    print("\n=== ДЕМОНСТРАЦИЯ 1: Последовательная цепочка промптов (LLMChain) ===")
-    
-    template_topic = PromptTemplate(
-        template="Выбери интересную и актуальную тему для исследования в области {domain}.",
-        required_variables=["domain"]
+    erp = ERPIntegrationTools(base_url=config.erp_base_url, service_token=config.erp_service_token)
+    for name, desc, params, func, cat in [
+        ("get_project_card", "Карточка проекта по коду.", {"project_code": {"type": "string"}}, erp.get_project_card, "fsm_single"),
+        ("get_trip_details", "Детали командировки по ID.", {"schedule_id": {"type": "integer"}}, erp.get_trip_details, "hr_single"),
+        ("list_upcoming_trips", "Список командировок.", {}, erp.list_upcoming_trips, "hr_summary"),
+        ("append_task_details", "Запись в лог наряда.", {"work_order_id": {"type": "integer"}, "text": {"type": "string"}, "author_name": {"type": "string"}}, erp.append_task_details, "fsm_single"),
+        ("consolidate_to_project", "Отчёт в карточку проекта.", {"project_id": {"type": "integer"}, "summary_text": {"type": "string"}}, erp.consolidate_to_project, "fsm_single"),
+        ("get_task_comments", "Комментарии по задаче.", {"work_order_id": {"type": "integer"}}, erp.get_task_comments, "fsm_single"),
+        ("update_task_summary", "Обновить отчёт задачи.", {"work_order_id": {"type": "integer"}, "summary_text": {"type": "string"}}, erp.update_task_summary, "fsm_single"),
+        ("search_knowledge_base", "Поиск в базе знаний.", {"query": {"type": "string"}}, erp.search_knowledge_base, "general"),
+    ]:
+        required = [k for k, v in params.items() if k in ("project_code", "schedule_id", "work_order_id", "project_id", "query", "text", "author_name", "summary_text")]
+        registry.register(Tool(name=name, description=desc, parameters={"type": "object", "properties": params, "required": required}, func=func, category=cat))
+
+    knowledge_dir = project_dir / "knowledge_base"
+    code_search = CodeSearchTool(config.code_search_backend_path)
+    registry.register(Tool(
+        name="search_code", description="Поиск по исходникам проекта.",
+        parameters={"type": "object", "properties": {"query": {"type": "string"}, "file_pattern": {"type": "string"}}, "required": ["query"]},
+        func=code_search.search, category="code_search",
+    ))
+
+    entity_schema = EntitySchemaTool(knowledge_dir)
+    registry.register(Tool(
+        name="get_entity_schema", description="Схема таблицы БД.",
+        parameters={"type": "object", "properties": {"table_name": {"type": "string"}}, "required": ["table_name"]},
+        func=entity_schema.get_schema, category="entity_schema",
+    ))
+
+    api_docs = ApiDocsTool(knowledge_dir)
+    registry.register(Tool(
+        name="get_api_docs", description="Документация API-эндпоинта.",
+        parameters={"type": "object", "properties": {"endpoint_pattern": {"type": "string"}}, "required": ["endpoint_pattern"]},
+        func=api_docs.get_docs, category="entity_schema",
+    ))
+
+    list_entities = ListEntitiesTool(knowledge_dir)
+    registry.register(Tool(
+        name="list_entities", description="Список таблиц или API-эндпоинтов.",
+        parameters={"type": "object", "properties": {"entity_type": {"type": "string"}}},
+        func=lambda entity_type="tables": list_entities.list_tables() if entity_type == "tables" else list_entities.list_api_endpoints(),
+        category="entity_schema",
+    ))
+
+    relations = EntityRelationsTool(knowledge_dir)
+    registry.register(Tool(
+        name="get_entity_relations", description="Связи таблицы.",
+        parameters={"type": "object", "properties": {"table_name": {"type": "string"}}, "required": ["table_name"]},
+        func=relations.get_relations, category="entity_schema",
+    ))
+
+    return registry
+
+
+def main() -> None:
+    config = Config.from_env()
+    setup_logging(config.log_level)
+    project_dir = Path(__file__).resolve().parent
+
+    logger.info("=== HERMES LLM Orchestrator ===")
+
+    cache = ResponseCache(str(project_dir / "cache.db"))
+    rate_limiter = DualRateLimiter(llm_rate=5, llm_burst=10)
+    metrics = MetricsCollector(str(project_dir / "metrics.db"))
+    input_guard = InputGuardrails()
+    output_guard = OutputGuardrails()
+    token_mgr = TokenManager(max_context=4096)
+
+    rag_engine = BM25SearchEngine()
+    knowledge_dir = project_dir / "knowledge_base"
+    if knowledge_dir.exists():
+        indexed = rag_engine.index_directory(knowledge_dir)
+        logger.info("RAG: %d chunks indexed", indexed)
+
+    conversation = ConversationBuffer(max_messages=config.conversation_max_messages)
+    registry = build_registry(config, project_dir)
+    logger.info("Registered %d tools", len(registry.tools))
+
+    llm = create_llm_from_config(config)
+    dispatcher = QueryDispatcher(llm)
+
+    loop_kwargs = dict(
+        dispatcher=dispatcher, conversation=conversation, rag_engine=rag_engine, config=config,
+        cache=cache, rate_limiter=rate_limiter, metrics=metrics,
+        input_guard=input_guard, output_guard=output_guard, token_mgr=token_mgr,
     )
-    
-    template_plan = PromptTemplate(
-        template="Составь подробный план статьи на тему: '{selected_topic}'.",
-        required_variables=["selected_topic"]
-    )
-    
+
+    print("\n=== Demo 1: Prompt Chain ===")
     chain = LLMChain(llm)
-    chain.add_step(
-        name="Выбор темы",
-        template=template_topic,
-        output_key="selected_topic"
-    )
-    chain.add_step(
-        name="Создание плана статьи",
-        template=template_plan,
-        output_key="article_plan"
-    )
-    
-    # Запуск цепочки
+    chain.add_step("Topic", PromptTemplate("Выбери тему в {domain}.", ["domain"]), "topic")
+    chain.add_step("Plan", PromptTemplate("План статьи: '{topic}'.", ["topic"]), "plan")
     try:
-        chain_result = chain.run({"domain": "медицинских технологий"})
-        print(f"\n[Результат цепочки] Выбранная тема: {chain_result['selected_topic']}")
-        print(f"[Результат цепочки] План статьи:\n{chain_result['article_plan']}")
+        r = chain.run({"domain": "AI"})
+        print(f"Тема: {r['topic']}\nПлан:\n{r['plan']}")
     except Exception as e:
-        print(f"[Ошибка выполнения цепочки]: {e}")
+        print(f"Error: {e}")
 
-    # --- ДЕМОНСТРАЦИЯ 2: Агентный цикл рассуждения и вызов кода в песочнице ---
-    print("\n=== ДЕМОНСТРАЦИЯ 2: Агент с вызовом кода в песочнице ===")
-    run_agentic_loop(
-        llm=llm,
-        registry=registry,
-        user_prompt="Пожалуйста, вычисли результат следующего математического выражения на Python: 105 * 2 + 10"
-    )
+    print("\n=== Demo 2: Compute ===")
+    run_agentic_loop(llm=llm, registry=registry, user_prompt="Посчитай 105 * 2 + 10", **loop_kwargs)
 
-    # --- ДЕМОНСТРАЦИЯ 3: Агент с мониторингом веб-ресурса ---
-    print("\n=== ДЕМОНСТРАЦИЯ 3: Агент с мониторингом веб-ресурса ===")
-    run_agentic_loop(
-        llm=llm,
-        registry=registry,
-        user_prompt="Пожалуйста, проверь состояние веб-ресурса https://httpbin.org/status/200 и убедись, что он работает."
-    )
+    print("\n=== Demo 3: Monitoring ===")
+    run_agentic_loop(llm=llm, registry=registry, user_prompt="Проверь httpbin.org/status/200", **loop_kwargs)
+
+    print("\n=== Demo 4: Knowledge Base ===")
+    run_agentic_loop(llm=llm, registry=registry, user_prompt="Какая структура БД?", **loop_kwargs)
+
+    print("\n=== Demo 5: Session Context ===")
+    run_agentic_loop(llm=llm, registry=registry, user_prompt="А какие таблицы?", **loop_kwargs)
+
+    print("\n=== Metrics ===")
+    print(metrics.export_json())
+    print("\n=== Done ===")
 
 
 if __name__ == "__main__":

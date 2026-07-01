@@ -43,6 +43,9 @@ def run_agentic_loop(
     token_mgr: TokenManager = None,
     session_id: str = "default",
     use_cache: bool = True,
+    self_learner=None,
+    skill_id: str = None,
+    skills_manager=None,
 ) -> dict:
     trace_id = new_trace_id()
     reset_trace()
@@ -90,9 +93,25 @@ def run_agentic_loop(
     if profile:
         context_parts.append(profile)
 
+    # Add learned examples from similar past interactions
+    if self_learner:
+        user_id = getattr(conversation, 'user_id', None)
+        examples = self_learner.get_relevant_examples(user_prompt, scope=scope, user_id=user_id)
+        if examples:
+            context_parts.append(self_learner.format_examples(examples))
+
     full_context = "\n\n".join(context_parts)
     tools_schemas = registry.get_schemas_for_scope(scope)
-    system_prompt = scope_prompt
+
+    # Skill_id from ERP frontend takes priority over dispatcher scope prompt
+    if skill_id and skills_manager:
+        skills = skills_manager.list_skills()
+        if skill_id in skills:
+            system_prompt = skills[skill_id]["system_prompt"]
+        else:
+            system_prompt = scope_prompt
+    else:
+        system_prompt = scope_prompt
 
     prompt_with_context = user_prompt
     if full_context:
@@ -110,9 +129,11 @@ def run_agentic_loop(
         return res
 
     retries = 0
+    all_tools_used = []
     while res.get("tool_calls") and retries < 3:
         for tc in res["tool_calls"]:
             fn_name = tc["function"]["name"]
+            all_tools_used.append(fn_name)
             try:
                 fn_args = json.loads(tc["function"]["arguments"])
             except Exception:
@@ -154,10 +175,24 @@ def run_agentic_loop(
     logger.info("Done in %.1fs", duration * 1000)
     logger.info("Trace:\n%s", format_trace())
 
-    result = {"ok": True, "content": answer, "trace_id": trace_id, "scope": scope, "duration_ms": round(duration * 1000, 1)}
+    result = {"ok": True, "content": answer, "trace_id": trace_id, "scope": scope,
+              "duration_ms": round(duration * 1000, 1), "tool_calls": all_tools_used}
 
     if use_cache and cache:
         cache.set(user_prompt, result)
+
+    # Record interaction for self-learning
+    if self_learner:
+        user_id = getattr(conversation, 'user_id', None)
+        if user_id:
+            self_learner.record_interaction(
+                user_id=user_id,
+                prompt=user_prompt,
+                response=answer,
+                scope=scope,
+                tools_used=all_tools_used,
+                success=True,
+            )
 
     return result
 

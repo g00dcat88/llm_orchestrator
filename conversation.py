@@ -3,9 +3,10 @@ from typing import Optional
 
 
 class ConversationBuffer:
-    def __init__(self, max_messages: int = 20):
+    def __init__(self, max_messages: int = 20, user_id: str = None):
         self.messages: deque[dict] = deque(maxlen=max_messages)
         self.user_profile: dict = {}
+        self.user_id = user_id
 
     def add_user_message(self, content: str) -> None:
         self.messages.append({"role": "user", "content": content})

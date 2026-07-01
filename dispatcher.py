@@ -39,6 +39,8 @@ class QueryDispatcher:
             return {"scope": "entity_schema", "entity_id": None, "reason": "fallback: entity_schema"}
         if any(w in q for w in ("исходник", "функци", "класс", "метод")):
             return {"scope": "code_search", "entity_id": None, "reason": "fallback: code_search"}
+        if any(w in q for w in ("чат", "переписк", "тезис", "отчёт", "структурируй", "собери отчёт")):
+            return {"scope": "chat_secretary", "entity_id": None, "reason": "fallback: chat_secretary"}
         if any(w in q for w in ("иванов", "петров", "сотрудник", "командировк", "отпуск")):
             return {"scope": "hr_single", "entity_id": None, "reason": "fallback: hr_single"}
         return {"scope": "general", "entity_id": None, "reason": "fallback: general"}

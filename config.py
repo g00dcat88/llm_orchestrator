@@ -39,7 +39,7 @@ class Config:
 
     log_level: str = "INFO"
 
-    conversation_max_messages: int = 20
+    conversation_max_messages: int = 50
     rag_top_k: int = 5
     code_search_backend_path: str = ""
 
